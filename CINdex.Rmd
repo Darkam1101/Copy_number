@@ -1,0 +1,508 @@
+---
+title: "Copy Number Pipeline: ASCAT and CINdex"
+author: "Juan Lorell"
+date: "`r Sys.Date()`"
+output: pdf_document
+header-includes:
+  - \usepackage{hyperref}
+---
+# Background of Data
+The data for this analysis contains data GSE87048. The data contains CEL file from the micro array platform Affymetrix SNP 6.0 Human totaling 100 raw data that was  processed using steps shown later . The specific distribution of the data can be seen directly in the report (please contact author). The end goal of the project, specifically for the R portion of the coding was to create an input suitable for machine learning prediction and also to create a pipeline analysis for copy number research.
+
+# ASCAT
+ASCAT is a package developed by \href{https://pubmed.ncbi.nlm.nih.gov/20837533}{van Loo et al. (2010)}. which produces copy number analysis from either SNP array data, WGS, or WES. Although old, the package is still used to this day as a good analysis software to determine the copy number, ploidy, and also purity from a given sample. However, the input for this software is the LRR and BAF file from each sample which cannot be processed by the software. To get the input, the authors of the software have given instructions on how to process the raw .CEL data files.
+
+## Package Information
+Below was the package that are used and also dependencies to the packages used. This section of the code will give the code for installing the packages and calling the library. Please delete the "#" if the package is not downloaded yet into the R environment. Please visit https://github.com/VanLoo-lab/ascat for more information.
+```{r, eval=TRUE, warning=FALSE}
+setwd("~/brca/multi/COPY_NUMBER_ANALYSIS")
+#BiocManager::install("GenomicRanges")
+#BiocManager::install("IRanges")
+#devtools::install_github('VanLoo-lab/ascat/ASCAT')
+library(ASCAT)
+library(GenomicRanges)
+library(IRanges)
+```
+## Pre-ASCAT
+The author of ASCAT suggested that the requisition of the LRR and BAF data for each is done using the \href{https://penncnv.openbioinformatics.org/en/latest/user-guide/affy/="}{PennCNV-Affy pipeline} which is first processed by the Affymetrix Power Tool (AFP). Do note that the use of both tools can only be done in a Linux terminal with the choice of using Linux Sub-system for Windows (LSW) being possible to run AFP, however the use of PennCNV has not been tested for LSW. Attached below are the code for running both PennCNV and AFP that was used. Remove and copy-paste the code in a linux (or LSW) command terminal to get the input for ASCAT. Please take into account that additional reference data is needed to allow mapping of the CEL data file by reading the tutorial in the link above.
+```{r, eval=TRUE}
+#Step 1: genotyping
+#put/directory/here/apt-probeset-genotype -c put/directory/here/GenomeWideSNP_6.cdf -a birdseed --read-models-birdseed put/directory/here/GenomeWideSNP_6.birdseed.models --special-snps put/directory/here/GenomeWideSNP_6.specialSNPs --out-dir put/directory/here --cel-files put/directory/here/cel_file_list.txt
+
+
+#Step2: summarizing
+#put/directory/here/apt-probeset-summarize --cdf-file put/directory/here/GenomeWideSNP_6.cdf --analysis quant-norm.sketch=50000,pm-only,med-polish,expr.genotype=TRUE --target-sketch put/directory/here/hapmap.quant-norm.normalization-target.txt --out-dir put/directory/here/ --cel-files put/directory/here/cel_file_list.txt
+
+
+#Step 3: get LRR and BAF
+#put/directory/here/penncnv/LibFiles/penncnv/gw6/bin/normalize_affy_geno_cluster.pl put/directory/here/penncnv/LibFiles/ascat/gw6_0/gw6.genocluster analysis/sum/quant-norm.pm-only.med-polish.expr.summary.txt -locfile put/directory/here/penncnv/LibFiles/affygw6.hg19.pfb -out put/directory/here/penncnv/LibFiles/analysis/lrr_baf.txt
+
+```
+
+The result of step 3 can then be directly used for ASCAT, there is no need for normalization as it is done in the second step of the section above. Later on, ASCAT will also normalize the results using its own algorithm which will be shown in the next part.
+
+## ASCAT Data Preparation
+Data prep was done by first reading the data from the subsection above into r. The input for ASCAT, although it is LRR and BAF, must be in its own separate CSV (data frame if you don't want to write the data). As such, the code below first takes the chromosome location and specific nucleotide base where the DNA will bind to the specific SNP tags.This will then be used as a base for creating an empty data frame that could then be used to call data from LRR and BAF which are then matched using the data from SNPpos. The call of each sample is done using a for loop which is then concatenated together into the pre-made data frame. In LRR specifically, there is a normalization step using the mean of each SNP position. After that, the data is then made into txt, which is optional.
+```{r,eval=TRUE}
+#read data and define data frame
+lrrbaf = read.table("lrr_baf.txt", header = T, sep = "\t", row.names=1)
+
+SNPpos <- lrrbaf[, c(1, 2)]
+
+# Log R preparation
+logR_normal <- data.frame(row.names = rownames(SNPpos))
+logR_tumor <- data.frame(row.names = rownames(SNPpos))
+
+#separate tumor and normal
+for (i in seq(3, ncol(lrrbaf), by = 2)) {
+  s_logr <- sub(".CEL.Log.R.Ratio", "", colnames(lrrbaf)[i])
+  
+  # Determine if the sample is tumor or normal
+  if (grepl("_C\\d+", s_logr)) {
+    # Normal sample
+    Normal_LogR = lrrbaf[rownames(SNPpos), i, drop=F]
+    colnames(Normal_LogR) = s_logr
+    
+    CNprobes = substring(rownames(SNPpos), 1, 2) == "CN"
+    
+    Normal_LogR[CNprobes, 1] = Normal_LogR[CNprobes, 1] - mean(Normal_LogR[CNprobes, 1], na.rm=T)
+    Normal_LogR[!CNprobes, 1] = Normal_LogR[!CNprobes, 1] - mean(Normal_LogR[!CNprobes, 1], na.rm=T)
+    Normal_LogR = round(Normal_LogR, 4)
+    
+    logR_normal <- cbind(logR_normal, Normal_LogR)
+    
+  } else if (grepl("_T\\d+", s_logr)) {
+    # Tumor sample
+    Tumor_LogR = lrrbaf[rownames(SNPpos), i, drop=F]
+    colnames(Tumor_LogR) = s_logr
+    
+    CNprobes = substring(rownames(SNPpos), 1, 2) == "CN"
+    
+    Tumor_LogR[CNprobes, 1] = Tumor_LogR[CNprobes, 1] - mean(Tumor_LogR[CNprobes, 1], na.rm=T)
+    Tumor_LogR[!CNprobes, 1] = Tumor_LogR[!CNprobes, 1] - mean(Tumor_LogR[!CNprobes, 1], na.rm=T)
+    Tumor_LogR = round(Tumor_LogR, 4)
+    
+    logR_tumor <- cbind(logR_tumor, Tumor_LogR)
+  }
+}
+
+# BAF preparation
+baf_normal <- data.frame(row.names = rownames(SNPpos))
+baf_tumor <- data.frame(row.names = rownames(SNPpos))
+
+#separate tumor and normal
+for (i in seq(4, ncol(lrrbaf), by = 2)) {
+  s_baf <- sub(".CEL.B.Allele.Freq", "", colnames(lrrbaf)[i])
+  
+  # Determine if the sample is tumor or normal
+  if (grepl("_C\\d+", s_baf)) {
+    # Normal sample
+    Normal_BAF = lrrbaf[rownames(SNPpos), i, drop=F]
+    colnames(Normal_BAF) = s_baf
+    
+    Normal_BAF[Normal_BAF == 2] = NA
+    
+    baf_normal <- cbind(baf_normal, Normal_BAF)
+    
+  } else if (grepl("_T\\d+", s_baf)) {
+    # Tumor sample
+    Tumor_BAF = lrrbaf[rownames(SNPpos), i, drop=F]
+    colnames(Tumor_BAF) = s_baf
+    
+    Tumor_BAF[Tumor_BAF == 2] = NA
+    
+    baf_tumor <- cbind(baf_tumor, Tumor_BAF)
+  }
+}
+#write the result
+
+write.table(cbind(SNPpos,baf_tumor),paste("tumor.BAF.txt"),sep="\t",row.names=T,col.names=NA,quote=F)
+write.table(cbind(SNPpos,logR_tumor),paste("tumor.LogR.txt"),sep="\t",row.names=T,col.names=NA,quote=F)
+write.table(cbind(SNPpos,baf_normal),paste("normal.BAF.txt"),sep="\t",row.names=T,col.names=NA,quote=F)
+write.table(cbind(SNPpos,logR_normal),paste("normal.LogR.txt"),sep="\t",row.names=T,col.names=NA,quote=F)
+```
+If the sample only has tumor data, the code below can be used.
+```{r,eval= FALSE}
+#log_r prep
+logR <- data.frame(row.names = rownames(SNPpos))
+for (i in seq(3, ncol(lrrbaf), by = 2)) {
+  s_logr <- sub(".CEL.Log.R.Ratio","",colnames(lrrbaf)[i])
+  Tumor_LogR = lrrbaf[rownames(SNPpos),i,drop=F]
+  colnames(Tumor_LogR) = s_logr
+  
+  CNprobes = substring(rownames(SNPpos),1,2)=="CN"
+  
+  Tumor_LogR[CNprobes,1] = Tumor_LogR[CNprobes,1]-mean(Tumor_LogR[CNprobes,1],na.rm=T)
+  Tumor_LogR[!CNprobes,1] = Tumor_LogR[!CNprobes,1]-mean(Tumor_LogR[!CNprobes,1],na.rm=T)
+  Tumor_LogR = round(Tumor_LogR,4)
+  
+  logR <- cbind(logR, Tumor_LogR)
+}
+
+#BAF prep
+baf <- data.frame(row.names = rownames(SNPpos))
+for (i in seq(4, ncol(lrrbaf), by = 2)) {
+  s_baf <- sub(".CEL.B.Allele.Freq","",colnames(lrrbaf)[i])
+  Tumor_BAF = lrrbaf[rownames(SNPpos),i,drop=F]
+  colnames(Tumor_BAF) = s_baf
+  
+  Tumor_BAF[Tumor_BAF==2]=NA
+  
+  baf<-cbind(baf, Tumor_BAF)
+}
+#write the result
+write.table(cbind(SNPpos,baf),paste("tumor.BAF.txt"),sep="\t",row.names=T,col.names=NA,quote=F)
+write.table(cbind(SNPpos,logR),paste("tumor.LogR.txt"),sep="\t",row.names=T,col.names=NA,quote=F)
+```
+## ASCAT run
+### Data Calling
+Data calling is done by first importing the birdseed algorithm report from the pre-processing step. This will be used to get the gender of each patient in case those are wanted, which in this case is. The command used will separate the gender and transform the categorization into the allosomal form. Then, we can read the data from the previous step. Do note that we can call the data frame directly from the r environment. The calling using txt was done to easily see the data in excel.
+```{r, eval=TRUE}
+gender <- read.table("./geno/birdseed.report.txt", sep="\t", skip=66, header=T)
+sex <- as.vector(gender[,"computed_gender"])
+sex[sex == "female"] <- "XX"
+sex[sex == "male"] <- "XY"
+sex[sex == "unknown"] <- "XX"
+
+# Load data into ASCAT
+ascat.bc <- ascat.loadData(Tumor_LogR_file = "tumor.LogR.txt",
+                            Tumor_BAF_file = "tumor.BAF.txt",
+                            Germline_LogR_file = "normal.LogR.txt",
+                            Germline_BAF_file = "normal.BAF.txt",
+                            gender = sex,
+                            genomeVersion = "hg19")
+
+```
+### Normalization
+Normalization is done by ASCAT for the LRR data specifically for SNP array. This is done by comparing it with the normalized GC content and replication timing from the SNP array platform. As the platform used, as mentioned above, was SNP array 6.0 human, the authors has already made the needed file. The authors has also made some correction files for a few other SNP array platform which is convenient as the way to generate them is computationally expensive. 
+```{r,eval=TRUE, results = "hide"}
+ascat.nor = ascat.correctLogR(ascat.bc,
+                             GCcontentfile = "GC_nor.txt", 
+                             replictimingfile = "rt_nor.txt")
+```
+### Predicting Germline data
+As the sample has germline data for comparison this code was not run. However, in the case a normal sample is not collected alongside tumor sample, then this code can be used to predict the state/signal of the tumor may be. Do keep in mind that this might not result in accurate or reliable data. 
+```{r,eval=TRUE}
+##gg = ascat.predictGermlineGenotypes(ascat.nor, 
+##                                    platform = "AffySNP6",
+##                                    img.dir="./res/germline", 
+##                                    img.prefix = "germline_")
+```
+### Segment Data
+```{r,eval=TRUE, results = "hide"}
+ascat.seg = ascat.aspcf(ascat.nor,
+                       ascat.gg=NULL,
+                       out.dir="./res")
+```
+### Run main ASCAT program
+```{r,eval=TRUE, results = "hide"}
+ascat.output = ascat.runAscat(ascat.seg,
+                              img.dir="./res/combi",
+                               write_segments = T)
+```
+### Visualization of ASCAT
+Each step of ASCAT can be visualized using the code below. However, it is suggested to dp this last or as a background job while running CINdex as it is time consuming.
+```{r,eval=FALSE}
+#print raw data
+#ascat.plotRawData(ascat.bc, img.dir = "./picture/before",img.prefix = "b_")
+
+#print normalized data
+#ascat.plotRawData(ascat.nor, img.dir = "./picture/normalized",img.prefix = "n_")
+
+#print predicted germline
+#ascat.plotRawData(gg, img.dir = "./picture/predicted",img.prefix = "p_")
+
+#print segemented data
+#ascat.plotSegmentedData(ascat.seg, img.dir="./picture/segmented", img.prefix = "s_")
+```
+
+
+# Chromosome Instability Index (CINdex)
+CINdex is a package developed by \href{https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5761903/"}{Song L et al.(2017)}, which process high throughput screening technology for copy number data analysis.The package itself has been in the BioC repository since 2016. The main idea of the package is to allow users to see the genomic instability of the sample for either overall condition or in a specific section of a chromosome.
+
+## Package information
+The packages below are the packages listed as dependencies of CINdex. Please delete the "#" symbol if the package is not downloaded yet into the R environment For more information, please see the CINdex manual and attached files for more info in the BioConductor link: https://www.bioconductor.org/packages/release/bioc/html/CINdex.html.
+```{r, eval=TRUE, warning=FALSE}
+#BiocManager::install("pd.genomewidesnp.6")
+#BiocManager::install("rtracklayer")
+#BiocManager::install("biovizBase")
+#install.packages("R.utils")
+#BiocManager::install("TxDb.Hsapiens.UCSC.hg19.knownGene")
+#BiocManager::install("Homo.sapiens")
+#BiocManager::install("CINdex")
+library(pd.genomewidesnp.6)
+library(rtracklayer)
+library(biovizBase) #needed for stain information
+library(R.utils)
+library(TxDb.Hsapiens.UCSC.hg19.knownGene)
+library(Homo.sapiens)
+library(org.Hs.eg.db)                      
+library(AnnotationDbi)
+library(GenomicRanges)
+library(dplyr)
+library(CINdex)
+
+#note: some package may cause conflict, be carefull when running this code block. 
+```
+
+## Data Preparation
+This part is separated into 5 parts which is used to call and prepare the data so it can be used as a suitable input for CINdex
+
+
+### Prepare probe annotation file
+In this part, the CINdex manual gives several options. However, the first option will be chosen as it is more through in the steps to filter and select the annotation file.
+```{r, eval=TRUE}
+#connect to the underlying SQLite database that is part of the pd.genomewidesnp.6 package
+con <- db(pd.genomewidesnp.6)
+# get the copy number probes
+cnv <- dbGetQuery(con, "select man_fsetid, chrom, chrom_start, chrom_stop,
+strand from featureSetCNV;")
+head(cnv, n =3) #print first few rows
+
+#get the SNP probes
+snp <- dbGetQuery(con, "select man_fsetid, dbsnp_rs_id, chrom, physical_pos,
+strand from featureSet;")
+head(snp, n=3)
+```
+After Downloading all the reference data we can then transform them into a GenomicRange data. This was done using the code below.
+```{r,eval=TRUE}
+#function to convert Copy number data into GRanges object
+convert.to.gr.cnv <- function(cnv2) {
+  cnv2$chrom <- paste0("chr", cnv2$chrom)
+  # subset out SNPs with missing location
+  cnv2 <- cnv2[!(is.na(cnv2$chrom) | is.na(cnv2$chrom_start)),]
+  # convert strand info to +,-,*
+  cnv2$strand[is.na(cnv2$strand)] <- 2
+  cnv2$strand <- cnv2$strand + 1
+  cnv2$strand <- c("+", "-", "*")[cnv2$strand]
+  #convert into GRanges object
+  cnv2.gr <- GRanges(cnv2$chrom, IRanges(cnv2$chrom_start,cnv2$chrom_stop),
+  cnv2$strand, ID = cnv2$man_fsetid)
+  return(cnv2.gr)
+}
+
+#function to convert SNP data into GRanges object
+convert.to.gr.snp <- function(snp2) {
+  # make chromosomes the same as a chain file
+  snp2$chrom <- paste0("chr", snp2$chrom)
+  # subset out SNPs with missing location
+  snp2 <- snp2[!(is.na(snp2$chrom) | is.na(snp2$physical_pos)),]
+  # convert strand info to +,-,*
+  snp2$strand[is.na(snp2$strand)] <- 2
+  snp2$strand <- snp2$strand + 1
+  snp2$strand <- c("+", "-", "*")[snp2$strand]
+  snp2.gr <- GRanges(snp2$chrom, IRanges(snp2$physical_pos,snp2$physical_pos),
+  snp2$strand, ID = snp2$man_fsetid,
+  dbsnp = snp2$dbsnp_rs_id)
+  return(snp2.gr)
+}
+
+# convert this copy number data from into a GRanges object
+cnv.gr <- convert.to.gr.cnv(cnv2 = cnv)
+head(cnv.gr, n=3)
+
+# convert this SNP data from into a GRanges object
+snp.gr <- convert.to.gr.snp(snp2 = snp)
+head(snp.gr, n=3)
+```
+According to the current version of CINdex (version 1.32.0), the current package does not support the analysis of allosome and mitochondrial chromosome. As such, it is necessary to remove them from the dataframe which can be done using the code below if the sample contains said data.
+```{r,eval= TRUE}
+#subset only those probes that are in autosomes
+snpgr.19.auto <- subset(snp.gr, seqnames(snp.gr) %in% c("chr1",
+                                                        "chr2", "chr3","chr4",
+                                                        "chr5", "chr6", "chr7",
+                                                        "chr8", "chr9", "chr10",
+                                                        "chr11", "chr12", "chr13",
+                                                        "chr14", "chr15", "chr16",
+                                                        "chr17", "chr18","chr19",
+                                                        "chr20", "chr21", "chr22"))
+
+#subset only those probes that are in autosomes
+cnvgr.19.auto <- subset(cnv.gr, seqnames(cnv.gr) %in% c("chr1",
+                                                        "chr2", "chr3","chr4",
+                                                        "chr5", "chr6", "chr7",
+                                                        "chr8", "chr9", "chr10",
+                                                        "chr11", "chr12", "chr13",
+                                                        "chr14", "chr15", "chr16",
+                                                        "chr17", "chr18","chr19",
+                                                        "chr20", "chr21", "chr22"))
+```
+
+### Reference Genome Data Calling
+The refernce data is done by importing the cytoband and staining information from the hg19 reference genome. This was done using the rtrack package, thgough there are a few other options that can be used such as direct importing from USCS genome browser.
+```{r, eval=TRUE}
+# create a query against a UCSC Table browser
+query <- rtracklayer::ucscTableQuery("hg19", table = "cytoBand")
+table1 <- rtracklayer::getTable(query) # retrieve table
+head(table1)
+#Add an extra column with strand information
+table1$Strand <- c("*")
+## Convert object into GRanges object
+table1.gr <- GRanges(table1$chrom,
+IRanges(table1$chromStart, table1$chromEnd),
+table1$Strand,
+table1$name, table1$gieStain)
+head(table1.gr, n = 3)
+hg19.ucsctrack<-table1.gr
+#Save this object for future use
+#save(table1.gr, file = "hg19.ucsctrack.RData")
+
+```
+ 
+### Clinical Data Calling
+CINdex can be used to compare different patients data. As such, having samples that have differing conditions can be compared together. For CINdex, this is done through mostly box plot.
+```{r, eval=TRUE}
+clin<-read.csv("./clinical.csv", header= TRUE)
+str(clin)# check structure
+class(clin)#check object type
+```
+As the class is not what we want, we have to convert it. This is done using the code below
+```{r,eval=TRUE}
+clin <- as.matrix(clin)
+str(clin)
+class(clin)
+print(head(clin))
+```
+
+### Calling Gene Annotation Data
+Next, we need annotation data to translate the array id into Gene symbols. This is usually done with the TxDb database. Be mindful as there are a lot of annotation version, so make sure everything is the same.
+```{r,eval=TRUE}
+# Assign the UCSC hg19 TxDb object to Homo.sapiens
+txdb<-TxDb(Homo.sapiens) <- TxDb.Hsapiens.UCSC.hg19.knownGene
+
+z <- AnnotationDbi::select(txdb, keys(Homo.sapiens, "CDSID"),
+            c("CDSID", "CDSCHROM", "CDSSTRAND", "CDSSTART", "CDSEND", "GENEID"), "CDSID")
+library(org.Hs.eg.db)
+
+# Map GENEID to SYMBOL
+gene_symbols <- AnnotationDbi::select(org.Hs.eg.db, z$GENEID, "SYMBOL", "ENTREZID")
+
+# Merge the result with your initial data
+z <- merge(z, gene_symbols, by.x = "GENEID", by.y = "ENTREZID")
+
+
+# Remove rows with missing values
+z1 <- na.omit(object = z)
+
+```
+After that, the list of objects will be combined into a single matrix using the code below for easier calling.
+```{r,eval=TRUE}
+# extracting only the columns we want as a matrix
+geneAnno <- cbind(z1$CDSCHROM, z1$CDSSTRAND, z1$CDSSTART, z1$CDSEND, z1$SYMBOL)
+colnames(geneAnno) <- c("chrom","strand", "cdsStart", "cdsEnd", "GeneName")
+#So this gene annotation file looks like this
+head(geneAnno, n=3)
+#Examining the class and structure of this oject
+class(geneAnno)
+str(geneAnno)
+```
+
+### Transform segmented data
+For CINdex, the data that are going to be used for the input needs to be a Grange object. As ASCAT does not store their data in Grange, the GenomicRanges package is used to convert the object type from list data type to Grange list. The conversion references the BioConductor document named "ASCAT to RaggedExperiment" by *<a href="https://bioconductor.org/packages/release/bioc/vignettes/RaggedExperiment/inst/doc/ASCAT_to_RaggedExperiment.html" style="color:blue;">King and Ramos (2024)</a>* with a lot of modifications to the code.
+```{r, eval=TRUE}
+raw<-ascat.output$segments_raw
+print(head(raw))
+raw<-dplyr::select(raw, -c("nMajor", "nMinor"))
+
+class(raw)
+raw$value <- rowMeans(raw[, c("nAraw", "nBraw")])
+head(raw)
+
+raw_filtered <- raw[raw$chr %in% 1:22, ]
+
+cin_data <- raw_filtered[, c("sample", "chr", "startpos", "endpos", "value")]
+head(cin_data)
+
+gr_list <- lapply(split(cin_data, cin_data$sample), function(df) {
+  GRanges(seqnames = df$chr,
+          ranges = IRanges(start = df$startpos, end = df$endpos),
+          strand = "*",  # Assuming no strand information
+          value = df$value)
+})
+input <- GRangesList(gr_list)
+class(input)
+head(input)
+```
+To know which samples are used, the names of the samples in the input is printed using the code below. This code can also be used to select the data from which entry to which. Use another code to specifically select samples, but those are not given.
+```{r, eval=TRUE}
+names(input)
+length(input)
+test <- input[1:5]
+test
+```
+## Run CINdex
+### standard run
+Next, the first step of CINdex will start. This may take a week using core i5 10 gen while core i9 elevnt might take a 3-4 days. Do keep that in mind so that no laptop is used. If laptop is used for previous code, move towards a pc environment after importing the r data.
+```{r,eval=FALSE}
+run.cin.chr(input)
+```
+The same warning as above, the CINdex package might take a long time. Using core i9 11th gen, almost 2 weeks where used to handle this command. It is recommended to run the command below using parallel processing if the computer can handle it. Please keep in mind also that the ram needed is arround 128 for parallel processing. 
+### run cytoband
+```{r,eval= FALSE}
+run.cin.cyto(grl.seg = input, cnvgr=cnvgr.19.auto, snpgr=snpgr.19.auto,
+genome.ucsc = hg19.ucsctrack)
+
+```
+### parallel processing code
+```{r,eval= FALSE}
+library(parallel)
+
+# Define function to run the CINdex operation
+run_cin_parallel <- function(V.mode, V.def, out.folder.name) {
+  tryCatch({
+    if (!dir.exists(out.folder.name)) {
+      dir.create(out.folder.name, recursive = TRUE)
+    }
+    
+    message("Running CINdex with mode: ", V.mode, " and V.def: ", V.def)
+    
+    # CINdex function
+    run.cin.cyto(
+      grl.seg = input, 
+      cnvgr = cnvgr.19.auto, 
+      snpgr = snpgr.19.auto, 
+      genome.ucsc = hg19.ucsctrack, 
+      V.def = V.def, 
+      V.mode = V.mode, 
+      chr.num = 22, 
+      out.folder.name = out.folder.name
+    )
+    
+    message("Completed CINdex for mode: ", V.mode, " and V.def: ", V.def)
+    return(TRUE)
+  }, error = function(e) {
+    message("Error in CINdex: ", e)
+    return(FALSE)
+  })
+}
+
+# Function to execute with a fixed number of cores (max CPU - 1)
+run_with_fixed_cores <- function() {
+  modes <- c("sum", "del", "amp")
+  V.definitions <- list(normalized = 2, unnormalized = 3)
+
+  # Use maximum available cores minus one
+  n_cores <- detectCores() - 1
+  message("Running with ", n_cores, " cores.")
+
+  # Run all combinations of mode and normalization
+  results <- mclapply(modes, function(mode) {
+    lapply(names(V.definitions), function(normalization) {
+      V.def <- V.definitions[[normalization]]
+      folder_name <- paste0("output_", mode, "_", normalization)
+      run_cin_parallel(V.mode = mode, V.def = V.def, out.folder.name = folder_name)
+    })
+  }, mc.cores = n_cores)
+
+  return(results)
+}
+
+# Execute the function
+results <- run_with_fixed_cores()
+```
+
+#Session info
+Thank you for reading. In you have any questions; results request of my run; and/or input for the code, please send to juan.lorell@student.i3l.ac.id.
+```{r, eval=TRUE}
+sessionInfo()
+```
